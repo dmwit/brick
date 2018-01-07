@@ -144,8 +144,8 @@ withBorderStyle bs p = Widget (hSize p) (vSize p) $ withReaderT (& ctxBorderStyl
 emptyWidget :: Widget n
 emptyWidget = raw V.emptyImage
 
--- | Add an offset to all cursor locations, visbility requests, and
--- extents in the specified rendering result. This function is critical
+-- | Add an offset to all cursor locations, visibility requests, extents, and
+-- pending borders in the specified rendering result. This function is critical
 -- for maintaining correctness in the rendering results as they are
 -- processed successively by box layouts and other wrapping combinators,
 -- since calls to this function result in converting from widget-local
@@ -156,7 +156,8 @@ emptyWidget = raw V.emptyImage
 addResultOffset :: Location -> Result n -> Result n
 addResultOffset off = addCursorOffset off .
                       addVisibilityOffset off .
-                      addExtentOffset off
+                      addExtentOffset off .
+                      addBorderOffset off
 
 addVisibilityOffset :: Location -> Result n -> Result n
 addVisibilityOffset off r = r & visibilityRequestsL.each.vrPositionL %~ (off <>)
@@ -188,6 +189,24 @@ addCursorOffset off r =
     let onlyVisible = filter isVisible
         isVisible l = l^.locationColumnL >= 0 && l^.locationRowL >= 0
     in r & cursorsL %~ (\cs -> onlyVisible $ (`clOffset` off) <$> cs)
+
+addBorderOffset :: Location -> Result n -> Result n
+addBorderOffset off r =
+    let row = off ^. locationRowL
+        col = off ^. locationColumnL
+        addBorderOffsetV db = db & offersL     %~ M.mapKeysMonotonic (row+)
+                                 & acceptorsL  %~ M.mapKeysMonotonic (row+)
+                                 & coordinateL %~ (col+)
+        addBorderOffsetH db = db & offersL     %~ M.mapKeysMonotonic (col+)
+                                 & acceptorsL  %~ M.mapKeysMonotonic (col+)
+                                 & coordinateL %~ (row+)
+        offsetFunctions = EdgeAnnotation
+            { eaTop    = addBorderOffsetH
+            , eaBottom = addBorderOffsetH
+            , eaLeft   = addBorderOffsetV
+            , eaRight  = addBorderOffsetV
+            }
+    in r & bordersL %~ (offsetFunctions <*>)
 
 unrestricted :: Int
 unrestricted = 100000
@@ -404,6 +423,14 @@ data BoxRenderer n =
                 , concatenatePrimary :: [V.Image] -> V.Image
                 , locationFromOffset :: Int -> Location
                 , padImageSecondary :: Int -> V.Image -> V.Attr -> V.Image
+                , frontPrimary :: forall a. EdgeAnnotation a -> a
+                -- ^ "front" means lower coordinate values, "back" means higher
+                , backPrimary :: forall a. EdgeAnnotation a -> a
+                , frontSecondary :: forall a. EdgeAnnotation a -> a
+                , backSecondary :: forall a. EdgeAnnotation a -> a
+                , annotate :: forall a. a -> a -> a -> a -> EdgeAnnotation a
+                -- ^ arguments come in 'frontPrimary', 'backPrimary',
+                -- 'frontSecondary', 'backSecondary' order
                 }
 
 vBoxRenderer :: BoxRenderer n
@@ -420,6 +447,16 @@ vBoxRenderer =
                 , padImageSecondary = \amt img a ->
                     let p = V.charFill a ' ' amt (V.imageHeight img)
                     in V.horizCat [img, p]
+                , frontPrimary = eaTop
+                , backPrimary = eaBottom
+                , frontSecondary = eaLeft
+                , backSecondary = eaBottom
+                , annotate = \t b l r -> EdgeAnnotation
+                    { eaTop = t
+                    , eaBottom = b
+                    , eaLeft = l
+                    , eaRight = r
+                    }
                 }
 
 hBoxRenderer :: BoxRenderer n
@@ -436,6 +473,16 @@ hBoxRenderer =
                 , padImageSecondary = \amt img a ->
                     let p = V.charFill a ' ' (V.imageWidth img) amt
                     in V.vertCat [img, p]
+                , frontPrimary = eaLeft
+                , backPrimary = eaRight
+                , frontSecondary = eaTop
+                , backSecondary = eaBottom
+                , annotate = \l r t b -> EdgeAnnotation
+                    { eaTop = t
+                    , eaBottom = b
+                    , eaLeft = l
+                    , eaRight = r
+                    }
                 }
 
 -- | Render a series of widgets in a box layout in the order given.
@@ -543,10 +590,32 @@ renderBox br ws =
                          img (c^.attrL)
           paddedImages = padImage <$> allImages
 
+          -- Merge the borders. The internal borders have all been handled
+          -- already, so in the primary direction, we only need the borders
+          -- sandwiching the first and last widget in the list. In the
+          -- secondary direction, we keep everything that's butting up against
+          -- the edge of the new size (it is okay to throw away all the other
+          -- dynamic borders: they're already rendered, and since we are adding
+          -- padding next to them, they need not connect to anything).
+          allBorders = borders <$> allTranslatedResults
+          mergeSecondaryBorders coord bs =
+              let matching = filter ((coord==) . coordinate) bs
+              in DynamicBorder
+                { offers = M.unions (offers <$> matching)
+                , acceptors = M.unions (acceptors <$> matching)
+                , coordinate = coord
+                }
+          mergedBorders = annotate br
+            (frontPrimary br (head allBorders))
+            (backPrimary  br (last allBorders))
+            (mergeSecondaryBorders 0 (frontSecondary br <$> allBorders))
+            (mergeSecondaryBorders (maxSecondary-1) (backSecondary br <$> allBorders))
+
       cropResultToContext $ Result (concatenatePrimary br paddedImages)
                             (concat $ cursors <$> allTranslatedResults)
                             (concat $ visibilityRequests <$> allTranslatedResults)
                             (concat $ extents <$> allTranslatedResults)
+                            mergedBorders
 
 -- | Limit the space available to the specified widget to the specified
 -- number of columns. This is important for constraining the horizontal

@@ -33,13 +33,14 @@ module Brick.Types
   , getContext
 
   -- ** The rendering context
-  , Context(ctxAttrName, availWidth, availHeight, ctxBorderStyle, ctxAttrMap)
+  , Context(ctxAttrName, availWidth, availHeight, ctxBorderStyle, ctxAttrMap, ctxBorderDynamics)
   , attrL
   , availWidthL
   , availHeightL
   , ctxAttrMapL
   , ctxAttrNameL
   , ctxBorderStyleL
+  , ctxBorderDynamicsL
 
   -- ** Rendering results
   , Result(..)
@@ -57,6 +58,15 @@ module Brick.Types
   , VisibilityRequest(..)
   , vrPositionL
   , vrSizeL
+
+  -- ** Dynamic borders
+  , JoinStyle(..)
+  , defaultJoinStyle
+  , EdgeAnnotation(..)
+  , defaultBorderDynamics
+  , DynamicBorder(..)
+  , OfferJoinPoint(..)
+  , AcceptJoinSegment(..)
 
   -- * Making lenses
   , suffixLenses
