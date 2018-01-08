@@ -36,8 +36,11 @@ import Data.Monoid ((<>))
 import Control.Applicative ((<$>))
 #endif
 
-import Lens.Micro ((^.), to)
+import Control.Applicative (liftA2, liftA3)
+import Lens.Micro ((^.), (.~), (%~), (&), to)
 import Graphics.Vty (imageHeight, imageWidth)
+import qualified Data.Map as M
+import qualified Data.Set as S
 
 import Brick.AttrMap
 import Brick.Types
@@ -139,6 +142,11 @@ hBorderWithLabel :: Widget n
                  -> Widget n
 hBorderWithLabel label = hBorder_ (Just label)
 
+-- TODO: Generate dynamic border information. We leave this until the box
+-- renderer stuff is working because we would like to reuse some of the
+-- machinery from there. Notionally we are just hcatting some stuff in the
+-- label case, with some wrinkles to deal gracefully with Greedy labels, and
+-- I'd like to reuse the same machinery built for hcat/renderBox in here.
 hBorder_ :: Maybe (Widget n) -> Widget n
 hBorder_ label =
     Widget Greedy Fixed $ do
@@ -150,5 +158,75 @@ hBorder_ label =
 vBorder :: Widget n
 vBorder =
     Widget Fixed Greedy $ do
-      bs <- ctxBorderStyle <$> getContext
-      render $ hLimit 1 $ withAttr vBorderAttr $ fill (bsVertical bs)
+      ctx <- getContext
+      let fillChar = bsVertical (ctxBorderStyle ctx)
+      result <- render $ hLimit 1 $ withAttr vBorderAttr $ fill fillChar
+      let allJoinSegments = segment ctx (availHeight ctx)
+          joinSegments = pure M.empty
+                       & eaLeftL  %~ maybe id (M.insert 0) (eaLeft  allJoinSegments)
+                       & eaRightL %~ maybe id (M.insert 0) (eaRight allJoinSegments)
+          joinPoints = point ctx
+                     & eaLeftL  .~ M.empty
+                     & eaRightL .~ M.empty
+          coords = coordinates ctx
+          dbs = liftA3 DynamicBorder joinPoints joinSegments coords
+      return (result & bordersL .~ dbs)
+
+-- | Given the current rendering context and the length of a segment, produce
+-- segments appropriate for inclusion at the various boundaries of a widget.
+segment :: Context -> Int -> EdgeAnnotation (Maybe AcceptJoinSegment)
+segment _ 0 = pure Nothing
+segment ctx len =
+    let style = ctxBorderStyle ctx
+        dyn   = ctxBorderDynamics ctx
+        maybeKeep js a = if acceptJoin js then Just a else Nothing
+        mkAJS attr par perp startL endL startBoth endBoth startIn startOut middleIn middleOut endIn endOut =
+            let offerStartJoin = dyn ^. startL.offerJoinL
+                offerEndJoin   = dyn ^.   endL.offerJoinL
+            in AcceptJoinSegment
+            { jsLength = len
+            , jsStyle = attrMapLookup attr (ctxAttrMap ctx)
+            , jsInnerJoinPoints = S.empty
+            , jsParallel      = par  style
+            , jsPerpendicular = perp style
+            , jsStartInward  = (if offerStartJoin then middleIn        else startIn  ) style
+            , jsStartOutward = (if offerStartJoin then middleOut       else startOut ) style
+            , jsStartBoth    = (if offerStartJoin then bsIntersectFull else startBoth) style
+            , jsMiddleInward  = middleIn        style
+            , jsMiddleOutward = middleOut       style
+            , jsMiddleBoth    = bsIntersectFull style
+            , jsEndInward  = (if offerEndJoin then middleIn        else endIn  ) style
+            , jsEndOutward = (if offerEndJoin then middleOut       else endOut ) style
+            , jsEndBoth    = (if offerEndJoin then bsIntersectFull else endBoth) style
+            }
+        hAJS = mkAJS hBorderAttr bsHorizontal bsVertical eaLeftL eaRightL bsIntersectL bsIntersectR
+        vAJS = mkAJS vBorderAttr bsVertical bsHorizontal eaTopL eaBottomL bsIntersectT bsIntersectB
+    in liftA2 maybeKeep dyn EdgeAnnotation
+        { eaTop    = hAJS bsCornerTL bsCornerBL bsIntersectT bsIntersectB bsCornerTR bsCornerBR
+        , eaBottom = hAJS bsCornerBL bsCornerTL bsIntersectB bsIntersectT bsCornerBR bsCornerTR
+        , eaLeft   = vAJS bsCornerTL bsCornerTR bsIntersectT bsIntersectB bsCornerBL bsCornerBR
+        , eaRight  = vAJS bsCornerTR bsCornerTL bsIntersectB bsIntersectT bsCornerBR bsCornerBL
+        }
+
+point :: Context -> EdgeAnnotation (M.Map Int OfferJoinPoint)
+point ctx =
+    let horizAttr = attrMapLookup hBorderAttr (ctxAttrMap ctx)
+        vertAttr  = attrMapLookup vBorderAttr (ctxAttrMap ctx)
+        horizOJP  = OfferJoinPoint (bsHorizontal (ctx ^. ctxBorderStyleL)) horizAttr
+        vertOJP   = OfferJoinPoint (bsVertical   (ctx ^. ctxBorderStyleL)) vertAttr
+        dirs = EdgeAnnotation
+            { eaTop = vertOJP
+            , eaBottom = vertOJP
+            , eaLeft = horizOJP
+            , eaRight = horizOJP
+            }
+        offer ojp joinStyle = M.fromAscList [(0, ojp) | offerJoin joinStyle]
+    in liftA2 offer dirs (ctxBorderDynamics ctx)
+
+coordinates :: Context -> EdgeAnnotation Int
+coordinates ctx = EdgeAnnotation
+    { eaTop = 0
+    , eaBottom = availHeight ctx - 1
+    , eaLeft = 0
+    , eaRight = availWidth ctx - 1
+    }

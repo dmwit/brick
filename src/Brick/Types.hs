@@ -53,6 +53,7 @@ module Brick.Types
   , cursorsL
   , visibilityRequestsL
   , extentsL
+  , bordersL
 
   -- ** Visibility requests
   , VisibilityRequest(..)
@@ -62,7 +63,13 @@ module Brick.Types
   -- ** Dynamic borders
   , JoinStyle(..)
   , defaultJoinStyle
+  , offerJoinL
+  , acceptJoinL
   , EdgeAnnotation(..)
+  , eaTopL
+  , eaBottomL
+  , eaLeftL
+  , eaRightL
   , defaultBorderDynamics
   , DynamicBorder(..)
   , OfferJoinPoint(..)

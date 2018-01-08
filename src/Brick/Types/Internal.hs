@@ -40,6 +40,12 @@ module Brick.Types.Internal
   , vpSize
   , vpLeft
   , vpTop
+  , acceptJoinL
+  , offerJoinL
+  , eaTopL
+  , eaBottomL
+  , eaLeftL
+  , eaRightL
   , imageL
   , cursorsL
   , extentsL
@@ -189,16 +195,17 @@ data CursorLocation n =
                    deriving Show
 
 data EdgeAnnotation a =
-    EdgeAnnotation { eaTop, eaBottom, eaLeft, eaRight :: !a }
+    EdgeAnnotation { eaTop, eaBottom, eaLeft, eaRight :: a }
     deriving (Eq, Ord, Read, Show, Functor)
+
+suffixLenses ''EdgeAnnotation
 
 instance Applicative EdgeAnnotation where
     pure v = EdgeAnnotation v v v v
     EdgeAnnotation ft fb fl fr <*> EdgeAnnotation vt vb vl vr =
         EdgeAnnotation (ft vt) (fb vb) (fl vl) (fr vr)
 
--- Just for completeness; it's not clear where one might want this, and the
--- strictness annotation makes this a bit costly.
+-- Just for completeness; it's not clear where one might want this.
 instance Monad EdgeAnnotation where
     EdgeAnnotation vt vb vl vr >>= f =
         EdgeAnnotation
@@ -217,6 +224,8 @@ data JoinStyle =
               -- ^ Should widgets try to influence how their neighbors draw
               -- their borders?
               } deriving (Eq, Ord, Read, Show)
+
+suffixLenses ''JoinStyle
 
 defaultJoinStyle :: JoinStyle
 defaultJoinStyle = JoinStyle False False
