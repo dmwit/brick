@@ -1,6 +1,8 @@
 {-# LANGUAGE DeriveFunctor #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE RankNTypes #-}
 module Brick.Types.Internal
   ( ScrollRequest(..)
   , VisibilityRequest(..)
@@ -57,6 +59,7 @@ module Brick.Types.Internal
   , emptyResult
   , defaultJoinStyle
   , defaultBorderDynamics
+  , performPairwiseJoins
   )
 where
 
@@ -64,12 +67,12 @@ where
 import Data.Monoid
 #endif
 
-import Lens.Micro (_1, _2, Lens')
+import Lens.Micro (_1, _2, Lens', (%~), (&), (^.), lens)
 import Lens.Micro.TH (makeLenses)
 import Lens.Micro.Internal (Field1, Field2)
 import qualified Data.Set as S
 import qualified Data.Map as M
-import Graphics.Vty (Attr, Vty, Event, Button, Modifier, DisplayRegion, Image, emptyImage)
+import Graphics.Vty (Attr, Vty, Event, Button, Modifier, DisplayRegion, Image, emptyImage, char)
 
 import Brick.Types.TH
 import Brick.AttrMap (AttrName, AttrMap)
@@ -266,6 +269,9 @@ data AcceptJoinSegment =
                       , jsEndBoth :: !Char
                       } deriving (Eq, Read, Show)
 
+jsInnerJoinPointsL :: Lens' AcceptJoinSegment (S.Set Int)
+jsInnerJoinPointsL = lens jsInnerJoinPoints (\js ps -> js { jsInnerJoinPoints = ps })
+
 -- | An unfinished straight line that is notionally "jutting out" of a widget
 -- into its neighbor.
 data OfferJoinPoint =
@@ -304,6 +310,112 @@ emptyDynamicBorder = DynamicBorder M.empty M.empty 0
 
 emptyBorders :: EdgeAnnotation DynamicBorder
 emptyBorders = pure emptyDynamicBorder
+
+-- | Given an offer and its offset, and an acceptor and its offset, return a
+-- list that either has a single rewrite (as an offset+image pair) or is empty
+-- (if the offer's style or border type don't match the acceptor's).
+performJoin :: (Int, OfferJoinPoint) -> (Int, AcceptJoinSegment) -> [(Int, Image)]
+performJoin (io, o) (ia, a) =
+    [ (io, char (jsStyle a) (charSelector a))
+    | jpParallel o == jsPerpendicular a
+    , jpStyle o == jsStyle a
+    , 0 <= off && off < jsLength a -- defensive programming, should never actually be true
+    ]
+    where
+    off = io - ia
+    charSelector = case (off `S.member` jsInnerJoinPoints a, off == 0, off == jsLength a - 1) of
+        (False, False, False) -> jsMiddleOutward
+        (False, False, True ) -> jsEndOutward
+        (False, True , False) -> jsStartOutward
+        -- Edge case: an accepting join segment which is only one character
+        -- long. If we were to use a corner character, either one would look
+        -- wrong (and there's no good way to choose between them). So use a T
+        -- character instead, which will look rightish probably.
+        (False, True , True ) -> jsMiddleOutward
+        (True , False, False) -> jsMiddleBoth
+        (True , False, True ) -> jsEndBoth
+        (True , True , False) -> jsStartBoth
+        -- Same edge case as above.
+        (True , True , True ) -> jsMiddleBoth
+
+performMapJoins :: M.Map Int OfferJoinPoint -> M.Map Int AcceptJoinSegment -> M.Map Int Image
+performMapJoins om am = M.fromAscList (performListJoins (M.toAscList om) (M.toAscList am)) where
+    performListJoins oAll@(ot@(io, _):oRest) aAll@(at@(ia, a):aRest)
+        | io < ia = performListJoins oRest aAll
+        | io >= ia + jsLength a = performListJoins oAll aRest
+        | otherwise = performJoin ot at ++ performListJoins oRest aAll
+    performListJoins _ _ = []
+
+-- | Given some new inner join points, include them in the appropriate
+-- segments.
+addInnerJoinPoints :: S.Set Int -> M.Map Int AcceptJoinSegment -> M.Map Int AcceptJoinSegment
+addInnerJoinPoints points segments = M.fromAscList (merge (S.toAscList points) (M.toAscList segments)) where
+    merge ps@(p:pt) jss@((ijs, js):jst)
+        | p < ijs = merge pt jss
+        | p >= ijs + jsLength js = (ijs, js) : merge ps jst
+        | otherwise = merge pt ((ijs, js & jsInnerJoinPointsL %~ S.insert (p-ijs)):jst)
+    merge _ jss = jss
+
+-- | Internal use only.
+performUnidirectionalJoins
+    :: (borders ~ EdgeAnnotation DynamicBorder, border ~ DynamicBorder)
+    => Lens' borders border
+    -> Lens' borders border
+    -> borders
+    -> borders
+    -> (borders, M.Map Int Image)
+performUnidirectionalJoins toA toB a b =
+    let rewrites = performMapJoins (b ^. toA.offersL) (a ^. toB.acceptorsL)
+        withNewJoinPoints =
+            if (a ^. toB.coordinateL) == (a ^. toA.coordinateL)
+            then a & toA.acceptorsL %~ addInnerJoinPoints (M.keysSet rewrites)
+            else a
+    in (withNewJoinPoints, rewrites)
+
+-- | Join the dynamic borders of two widgets in a particular direction. For
+-- example, the invocation @performBidirectionalJoins eaTopL eaBottomL b1 b2@
+-- will connect the top border of @b2@ with the bottom border of @b1@. It
+-- returns the rewrites needed for each, and also returns new dynamic borders
+-- objects because the 'acceptors'\'s 'jsInnerJoinPoints' may have been
+-- updated.
+performBidirectionalJoins
+    :: (borders ~ EdgeAnnotation DynamicBorder, border ~ DynamicBorder)
+    => Lens' borders border
+    -> Lens' borders border
+    -> borders
+    -> borders
+    -> ((borders, M.Map Int Image), (borders, M.Map Int Image))
+performBidirectionalJoins toA toB a b =
+    ( performUnidirectionalJoins toA toB a b
+    , performUnidirectionalJoins toB toA b a
+    )
+
+-- | Join the dynamic borders of each pair of adjacent elements in a list.
+-- Return the updated borders information and the vty rewrites needed to keep
+-- the visuals in synch with the dynamic border information. For example, the
+-- invocation @performPairwiseJoins eaTopL eaBottomL bs@ will connect the
+-- bottom borders in @init bs@ with the top borders in @tail bs@ (and vice
+-- versa). If the triple @(b, r, r')@ is in the result, @b@ will be the updated
+-- border information, @r@ will be the rewrite needed for the top row, and @r'@
+-- will be the rewrite needed for the bottom row. In case the top and bottom
+-- rows coincide, the rewrites should be applied in order (first @r@, then
+-- @r'@).
+performPairwiseJoins
+    :: ( borders ~ EdgeAnnotation DynamicBorder
+       , border  ~ DynamicBorder
+       , rewrite ~ M.Map Int Image
+       )
+    => Lens' borders border
+    -> Lens' borders border
+    -> [borders]
+    -> [(borders, rewrite, rewrite)]
+performPairwiseJoins _ _ [] = []
+performPairwiseJoins toHead toTail (bFirst:bRest) = go bFirst M.empty bRest where
+    go bh rewriteh [] = [(bh, rewriteh, M.empty)]
+    go bh rewriteh (bt:bs) =
+        case performBidirectionalJoins toHead toTail bh bt of
+            ((bh', rewriteh'), (bt', rewritet))
+                -> (bh', rewriteh, rewriteh') : go bt' rewritet bs
 
 -- | The type of result returned by a widget's rendering function. The
 -- result provides the image, cursor positions, and visibility requests
