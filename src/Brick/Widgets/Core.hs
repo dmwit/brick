@@ -92,7 +92,7 @@ import Control.Applicative
 import Data.Monoid ((<>), mempty)
 #endif
 
-import Lens.Micro ((^.), (.~), (&), (%~), to, _1, _2, each, to, Lens')
+import Lens.Micro ((^.), (^..), (.~), (&), (%~), Lens', _1, _2, to, each, folded)
 import Lens.Micro.Mtl (use, (%=))
 import Control.Monad ((>=>),when)
 import Control.Monad.Trans.State.Lazy
@@ -104,7 +104,7 @@ import qualified Data.DList as DL
 import qualified Data.Map as M
 import qualified Data.Set as S
 import qualified Data.Function as DF
-import Data.List (sortBy, partition)
+import Data.List (sortBy, partition, transpose, mapAccumR)
 import qualified Graphics.Vty as V
 import Control.DeepSeq
 
@@ -421,16 +421,24 @@ data BoxRenderer n =
                 , limitSecondary :: Int -> Widget n -> Widget n
                 , primaryWidgetSize :: Widget n -> Size
                 , concatenatePrimary :: [V.Image] -> V.Image
+                , concatenateSecondary :: [V.Image] -> V.Image
                 , locationFromOffset :: Int -> Location
                 , padImageSecondary :: Int -> V.Image -> V.Attr -> V.Image
-                , frontPrimary :: forall a. EdgeAnnotation a -> a
+                , frontPrimary :: forall a. Lens' (EdgeAnnotation a) a
                 -- ^ "front" means lower coordinate values, "back" means higher
-                , backPrimary :: forall a. EdgeAnnotation a -> a
-                , frontSecondary :: forall a. EdgeAnnotation a -> a
-                , backSecondary :: forall a. EdgeAnnotation a -> a
+                , backPrimary :: forall a. Lens' (EdgeAnnotation a) a
+                , frontSecondary :: forall a. Lens' (EdgeAnnotation a) a
+                , backSecondary :: forall a. Lens' (EdgeAnnotation a) a
                 , annotate :: forall a. a -> a -> a -> a -> EdgeAnnotation a
                 -- ^ arguments come in 'frontPrimary', 'backPrimary',
                 -- 'frontSecondary', 'backSecondary' order
+                , cropFrontPrimary :: Int -> V.Image -> V.Image
+                -- ^ Like vty, we use the convention that cropFoo crops from
+                -- the foo direction, so 'cropFrontPrimary' deletes things at
+                -- the front in the primary direction if needed.
+                , cropBackPrimary :: Int -> V.Image -> V.Image
+                , cropFrontSecondary :: Int -> V.Image -> V.Image
+                , cropBackSecondary :: Int -> V.Image -> V.Image
                 }
 
 vBoxRenderer :: BoxRenderer n
@@ -443,20 +451,25 @@ vBoxRenderer =
                 , limitSecondary = hLimit
                 , primaryWidgetSize = vSize
                 , concatenatePrimary = V.vertCat
+                , concatenateSecondary = V.horizCat
                 , locationFromOffset = Location . (0 ,)
                 , padImageSecondary = \amt img a ->
                     let p = V.charFill a ' ' amt (V.imageHeight img)
                     in V.horizCat [img, p]
-                , frontPrimary = eaTop
-                , backPrimary = eaBottom
-                , frontSecondary = eaLeft
-                , backSecondary = eaBottom
+                , frontPrimary = eaTopL
+                , backPrimary = eaBottomL
+                , frontSecondary = eaLeftL
+                , backSecondary = eaBottomL
                 , annotate = \t b l r -> EdgeAnnotation
                     { eaTop = t
                     , eaBottom = b
                     , eaLeft = l
                     , eaRight = r
                     }
+                , cropFrontPrimary = V.cropTop
+                , cropBackPrimary = V.cropBottom
+                , cropFrontSecondary = V.cropLeft
+                , cropBackSecondary = V.cropRight
                 }
 
 hBoxRenderer :: BoxRenderer n
@@ -469,20 +482,25 @@ hBoxRenderer =
                 , limitSecondary = vLimit
                 , primaryWidgetSize = hSize
                 , concatenatePrimary = V.horizCat
+                , concatenateSecondary = V.vertCat
                 , locationFromOffset = Location . (, 0)
                 , padImageSecondary = \amt img a ->
                     let p = V.charFill a ' ' (V.imageWidth img) amt
                     in V.vertCat [img, p]
-                , frontPrimary = eaLeft
-                , backPrimary = eaRight
-                , frontSecondary = eaTop
-                , backSecondary = eaBottom
+                , frontPrimary = eaLeftL
+                , backPrimary = eaRightL
+                , frontSecondary = eaTopL
+                , backSecondary = eaBottomL
                 , annotate = \l r t b -> EdgeAnnotation
                     { eaTop = t
                     , eaBottom = b
                     , eaLeft = l
                     , eaRight = r
                     }
+                , cropFrontPrimary = V.cropLeft
+                , cropBackPrimary = V.cropRight
+                , cropFrontSecondary = V.cropTop
+                , cropBackSecondary = V.cropBottom
                 }
 
 -- | Render a series of widgets in a box layout in the order given.
@@ -585,10 +603,11 @@ renderBox br ws =
           -- avoid attribute over-runs or blank spaces with the wrong
           -- attribute. In a horizontal box we want all images to have
           -- the same height for the same reason.
-          maxSecondary = maximum $ imageSecondary br <$> allImages
+          allRewrittenImages = zipWith (rewriteImage br) allBordersAndRewrites allImages
+          maxSecondary = maximum $ imageSecondary br <$> allRewrittenImages
           padImage img = padImageSecondary br (maxSecondary - imageSecondary br img)
                          img (c^.attrL)
-          paddedImages = padImage <$> allImages
+          paddedImages = padImage <$> allRewrittenImages
 
           -- Merge the borders. The internal borders have all been handled
           -- already, so in the primary direction, we only need the borders
@@ -597,7 +616,11 @@ renderBox br ws =
           -- the edge of the new size (it is okay to throw away all the other
           -- dynamic borders: they're already rendered, and since we are adding
           -- padding next to them, they need not connect to anything).
-          allBorders = borders <$> allTranslatedResults
+          allBordersAndRewrites = performPairwiseJoins
+              (frontPrimary br)
+              (backPrimary br)
+              (map borders allTranslatedResults)
+          allBorders = [bs | (bs, _, _) <- allBordersAndRewrites]
           mergeSecondaryBorders coord bs =
               let matching = filter ((coord==) . coordinate) bs
               in DynamicBorder
@@ -606,16 +629,38 @@ renderBox br ws =
                 , coordinate = coord
                 }
           mergedBorders = annotate br
-            (frontPrimary br (head allBorders))
-            (backPrimary  br (last allBorders))
-            (mergeSecondaryBorders 0 (frontSecondary br <$> allBorders))
-            (mergeSecondaryBorders (maxSecondary-1) (backSecondary br <$> allBorders))
+            (head allBorders ^. frontPrimary br)
+            (last allBorders ^. backPrimary  br)
+            (mergeSecondaryBorders 0 (allBorders ^.. folded.frontSecondary br))
+            (mergeSecondaryBorders (maxSecondary-1) (allBorders ^.. folded.backSecondary br))
 
       cropResultToContext $ Result (concatenatePrimary br paddedImages)
                             (concat $ cursors <$> allTranslatedResults)
                             (concat $ visibilityRequests <$> allTranslatedResults)
                             (concat $ extents <$> allTranslatedResults)
                             mergedBorders
+
+rewriteImage ::
+    BoxRenderer n ->
+    (EdgeAnnotation DynamicBorder, M.Map Int V.Image, M.Map Int V.Image) ->
+    V.Image ->
+    V.Image
+rewriteImage br (_, rewritesFront, rewritesBack) = id
+    . rewriteBorder (cropFrontPrimary br) (cropBackPrimary  br) (\o m -> [m,o]) rewritesBack
+    . rewriteBorder (cropBackPrimary  br) (cropFrontPrimary br) (\o m -> [o,m]) rewritesFront
+    where
+    -- fast path: don't do anything if there's no rewrites
+    rewriteBorder _ _ _ rewrites img | M.null rewrites = img
+    rewriteBorder cOne cMany combineOneMany rewrites img =
+        let imgOne = cOne 1 img
+            imgMany = cMany (imagePrimary br img-1) img
+            (keptSegment, keptSegments) = mapAccumR
+                (\imgPrefix x -> (cropBackSecondary br x imgPrefix, cropFrontSecondary br (imageSecondary br imgPrefix-x-1) imgPrefix))
+                imgOne
+                (M.keys rewrites)
+            segments = concat (transpose [keptSegment:keptSegments, M.elems rewrites])
+            imgOne' = concatenateSecondary br segments
+        in concatenatePrimary br (combineOneMany imgOne' imgMany)
 
 -- | Limit the space available to the specified widget to the specified
 -- number of columns. This is important for constraining the horizontal
