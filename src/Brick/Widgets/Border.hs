@@ -204,8 +204,8 @@ segment ctx len =
     in liftA2 maybeKeep dyn EdgeAnnotation
         { eaTop    = hAJS bsCornerTL bsCornerBL bsIntersectT bsIntersectB bsCornerTR bsCornerBR
         , eaBottom = hAJS bsCornerBL bsCornerTL bsIntersectB bsIntersectT bsCornerBR bsCornerTR
-        , eaLeft   = vAJS bsCornerTL bsCornerTR bsIntersectT bsIntersectB bsCornerBL bsCornerBR
-        , eaRight  = vAJS bsCornerTR bsCornerTL bsIntersectB bsIntersectT bsCornerBR bsCornerBL
+        , eaLeft   = vAJS bsCornerTL bsCornerTR bsIntersectL bsIntersectR bsCornerBL bsCornerBR
+        , eaRight  = vAJS bsCornerTR bsCornerTL bsIntersectR bsIntersectL bsCornerBR bsCornerBL
         }
 
 point :: Context -> EdgeAnnotation (M.Map Int OfferJoinPoint)
