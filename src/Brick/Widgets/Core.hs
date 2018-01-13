@@ -34,6 +34,10 @@ module Brick.Widgets.Core
   , (<+>)
   , hBox
   , vBox
+  , catResults
+  , BoxRenderer
+  , hBoxRenderer
+  , vBoxRenderer
 
   -- * Limits
   , hLimit
@@ -50,6 +54,10 @@ module Brick.Widgets.Core
 
   -- * Border style management
   , withBorderStyle
+  , joinBorders
+  , detachBorders
+  , withBorderDynamics
+  , modifyBorderDynamics
 
   -- * Cursor placement
   , showCursor
@@ -592,7 +600,26 @@ renderBox br ws =
 
       let rendered = sortBy (compare `DF.on` fst) $ renderedHis ++ renderedLows
           allResults = snd <$> rendered
-          allImages = (^.imageL) <$> allResults
+      catResults br allResults
+
+-- | Place 'Result's next to each other in a given direction.
+--
+-- The 'hBox' and 'vBox' combinators use a particular strategy for allocating
+-- space to widgets, namely: give 'Fixed' widgets all the space they ask for,
+-- and divide the remaining space evenly among the 'Greedy' widgets.
+-- Occasionally you want a different space allocation strategy. For example,
+-- consider the case of centering a widget. Notionally this involves
+-- concatenating two "filler" widgets with the original widget in between; but
+-- one would like to preferentially assign extra space to the centered widget,
+-- as the "filler" widgets are uninteresting.
+--
+-- This function can be used to implement alternate space allocations: do the
+-- rendering and size computations for your widgets in whatever order makes
+-- sense, then use 'catResults' to combine all the renderings.
+catResults :: BoxRenderer n -> [Result n] -> RenderM n (Result n)
+catResults br allResults = do
+      c <- getContext
+      let allImages = (^.imageL) <$> allResults
           allPrimaries = imagePrimary br <$> allImages
           allTranslatedResults = (flip map) (zip [0..] allResults) $ \(i, result) ->
               let off = locationFromOffset br offPrimary
@@ -735,6 +762,28 @@ forceAttr an p =
     Widget (hSize p) (vSize p) $ do
         c <- getContext
         withReaderT (& ctxAttrMapL .~ (forceAttrMap (attrMapLookup an (c^.ctxAttrMapL)))) (render p)
+
+-- | When rendering the specified widget, modify the rules for deciding when
+-- borders should be joined together.
+modifyBorderDynamics :: (EdgeAnnotation JoinStyle -> EdgeAnnotation JoinStyle) -> Widget n -> Widget n
+modifyBorderDynamics f p =
+    Widget (hSize p) (vSize p) $
+        withReaderT (& ctxBorderDynamicsL %~ f) (render p)
+
+-- | When rendering the specified widget, set the rules for deciding when
+-- borders should be joined together.
+withBorderDynamics :: EdgeAnnotation JoinStyle -> Widget n -> Widget n
+withBorderDynamics = modifyBorderDynamics . const
+
+-- | When rendering the specified widget, connect any borders that come near
+-- each other.
+joinBorders :: Widget n -> Widget n
+joinBorders = withBorderDynamics (pure (JoinStyle True True))
+
+-- | When rendering the specified widget, keep perpendicular borders separated.
+-- This is the default.
+detachBorders :: Widget n -> Widget n
+detachBorders = withBorderDynamics (pure (JoinStyle False False))
 
 -- | Override the lookup of 'targetName' to return the attribute value
 -- associated with 'fromName' when rendering the specified widget.

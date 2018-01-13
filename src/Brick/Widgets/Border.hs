@@ -37,7 +37,7 @@ import Control.Applicative ((<$>))
 #endif
 
 import Control.Applicative (liftA2, liftA3)
-import Lens.Micro ((^.), (.~), (%~), (&), to)
+import Lens.Micro ((^.), (.~), (&), to)
 import Graphics.Vty (imageHeight, imageWidth)
 import qualified Data.Map as M
 import qualified Data.Set as S
@@ -45,7 +45,6 @@ import qualified Data.Set as S
 import Brick.AttrMap
 import Brick.Types
 import Brick.Widgets.Core
-import Brick.Widgets.Center (hCenterWith)
 import Brick.Widgets.Border.Style (BorderStyle(..))
 
 -- | The top-level border attribute name.
@@ -133,58 +132,85 @@ border_ label wrapped =
 
 -- | A horizontal border.  Fills all horizontal space.
 hBorder :: Widget n
-hBorder = hBorder_ Nothing
+hBorder = Widget Greedy Fixed $ do
+    ctx <- getContext
+    let fillChar = bsHorizontal (ctxBorderStyle ctx)
+    result <- render $ vLimit 1 $ withAttr hBorderAttr $ fill fillChar
+    let dbs = dynamicBorder ctx
+            & eaLeftL.acceptorsL .~ M.empty
+            & eaRightL.acceptorsL .~ M.empty
+            & eaTopL.offersL .~ M.empty
+            & eaBottomL.offersL .~ M.empty
+            & eaRightL.coordinateL .~ (availWidth ctx - 1)
+    return (result & bordersL .~ dbs)
 
 -- | A horizontal border with a label placed in the center of the
 -- border. Fills all horizontal space.
 hBorderWithLabel :: Widget n
                  -- ^ The label widget
                  -> Widget n
-hBorderWithLabel label = hBorder_ (Just label)
+hBorderWithLabel label = Widget Greedy Fixed $ do
+    c <- getContext
+    lblRes <- render . vLimit 1 . withAttr hBorderAttr $ label
+    let remainingWidth = c^.availWidthL - lblRes^.imageL.to imageWidth
+        leftPadding  = max 0 $ remainingWidth `div` 2
+        rightPadding = max 0 $ remainingWidth - leftPadding
+        offerRight = (& eaRightL.offerJoinL .~ True)
+        offerLeft  = (& eaLeftL .offerJoinL .~ True)
+    -- For maximum flexibility, we always offer to join with the centered
+    -- widget. If we just used whatever was in the context, we would have no
+    -- way to have a border which didn't offer to join in a particular
+    -- direction but did join with the centered label.
+    --
+    -- You might worry that always offering to join is also inflexible, in that
+    -- the caller may want a widget which does not join with the border.
+    -- Luckily, joining is a negotiation, so the user can specify a widget
+    -- which does not accept joins, and no joining will be performed.
+    lRes <- render . hLimit leftPadding  . modifyBorderDynamics offerRight $ hBorder
+    rRes <- render . hLimit rightPadding . modifyBorderDynamics offerLeft  $ hBorder
+    catResults hBoxRenderer [lRes, lblRes, rRes]
 
--- TODO: Generate dynamic border information. We leave this until the box
--- renderer stuff is working because we would like to reuse some of the
--- machinery from there. Notionally we are just hcatting some stuff in the
--- label case, with some wrinkles to deal gracefully with Greedy labels, and
--- I'd like to reuse the same machinery built for hcat/renderBox in here.
 hBorder_ :: Maybe (Widget n) -> Widget n
-hBorder_ label =
-    Widget Greedy Fixed $ do
-      bs <- ctxBorderStyle <$> getContext
-      let msg = maybe (str [bsHorizontal bs]) (withAttr hBorderLabelAttr) label
-      render $ vLimit 1 $ withAttr hBorderAttr $ hCenterWith (Just $ bsHorizontal bs) msg
+hBorder_ = maybe hBorder hBorderWithLabel
 
 -- | A vertical border.  Fills all vertical space.
 vBorder :: Widget n
-vBorder =
-    Widget Fixed Greedy $ do
-      ctx <- getContext
-      let fillChar = bsVertical (ctxBorderStyle ctx)
-      result <- render $ hLimit 1 $ withAttr vBorderAttr $ fill fillChar
-      let allJoinSegments = segment ctx (availHeight ctx)
-          joinSegments = pure M.empty
-                       & eaLeftL  %~ maybe id (M.insert 0) (eaLeft  allJoinSegments)
-                       & eaRightL %~ maybe id (M.insert 0) (eaRight allJoinSegments)
-          joinPoints = point ctx
-                     & eaLeftL  .~ M.empty
-                     & eaRightL .~ M.empty
-          coords = coordinates ctx
-          dbs = liftA3 DynamicBorder joinPoints joinSegments coords
-      return (result & bordersL .~ dbs)
+vBorder = Widget Fixed Greedy $ do
+    ctx <- getContext
+    let fillChar = bsVertical (ctxBorderStyle ctx)
+    result <- render $ hLimit 1 $ withAttr vBorderAttr $ fill fillChar
+    let dbs = dynamicBorder ctx
+            & eaTopL.acceptorsL .~ M.empty
+            & eaBottomL.acceptorsL .~ M.empty
+            & eaLeftL.offersL .~ M.empty
+            & eaRightL.offersL .~ M.empty
+            & eaBottomL.coordinateL .~ (availHeight ctx - 1)
+    return (result & bordersL .~ dbs)
 
--- | Given the current rendering context and the length of a segment, produce
--- segments appropriate for inclusion at the various boundaries of a widget.
-segment :: Context -> Int -> EdgeAnnotation (Maybe AcceptJoinSegment)
-segment _ 0 = pure Nothing
-segment ctx len =
+dynamicBorder :: Context -> EdgeAnnotation DynamicBorder
+dynamicBorder ctx = liftA3 DynamicBorder (point ctx) (segment ctx) (pure 0)
+
+-- | Given the current rendering context, produce segments appropriate for
+-- inclusion at the various boundaries of a widget.
+segment :: Context -> EdgeAnnotation (M.Map Int AcceptJoinSegment)
+segment ctx =
     let style = ctxBorderStyle ctx
         dyn   = ctxBorderDynamics ctx
-        maybeKeep js a = if acceptJoin js then Just a else Nothing
+        maybeKeep js len a =
+            if acceptJoin js && len > 0
+            then M.singleton 0 a{ jsLength = len }
+            else M.empty
+        lengths = EdgeAnnotation
+            { eaTop = availWidth ctx
+            , eaBottom = availWidth ctx
+            , eaLeft = availHeight ctx
+            , eaRight = availHeight ctx
+            }
         mkAJS attr par perp startL endL startBoth endBoth startIn startOut middleIn middleOut endIn endOut =
             let offerStartJoin = dyn ^. startL.offerJoinL
                 offerEndJoin   = dyn ^.   endL.offerJoinL
             in AcceptJoinSegment
-            { jsLength = len
+            { jsLength = 0 -- will be overwritten in maybeKeep
             , jsStyle = attrMapLookup attr (ctxAttrMap ctx)
             , jsInnerJoinPoints = S.empty
             , jsParallel      = par  style
@@ -201,7 +227,7 @@ segment ctx len =
             }
         hAJS = mkAJS hBorderAttr bsHorizontal bsVertical eaLeftL eaRightL bsIntersectL bsIntersectR
         vAJS = mkAJS vBorderAttr bsVertical bsHorizontal eaTopL eaBottomL bsIntersectT bsIntersectB
-    in liftA2 maybeKeep dyn EdgeAnnotation
+    in liftA3 maybeKeep dyn lengths EdgeAnnotation
         { eaTop    = hAJS bsCornerTL bsCornerBL bsIntersectT bsIntersectB bsCornerTR bsCornerBR
         , eaBottom = hAJS bsCornerBL bsCornerTL bsIntersectB bsIntersectT bsCornerBR bsCornerTR
         , eaLeft   = vAJS bsCornerTL bsCornerTR bsIntersectL bsIntersectR bsCornerBL bsCornerBR
@@ -222,11 +248,3 @@ point ctx =
             }
         offer ojp joinStyle = M.fromAscList [(0, ojp) | offerJoin joinStyle]
     in liftA2 offer dirs (ctxBorderDynamics ctx)
-
-coordinates :: Context -> EdgeAnnotation Int
-coordinates ctx = EdgeAnnotation
-    { eaTop = 0
-    , eaBottom = availHeight ctx - 1
-    , eaLeft = 0
-    , eaRight = availWidth ctx - 1
-    }

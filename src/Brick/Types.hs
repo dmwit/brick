@@ -72,6 +72,9 @@ module Brick.Types
   , eaRightL
   , defaultBorderDynamics
   , DynamicBorder(..)
+  , offersL
+  , acceptorsL
+  , coordinateL
   , OfferJoinPoint(..)
   , AcceptJoinSegment(..)
 
