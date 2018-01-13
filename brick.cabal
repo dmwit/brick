@@ -402,3 +402,15 @@ executable brick-progressbar-demo
                        vty >= 5.18.1,
                        text,
                        microlens
+
+executable brick-dynamic-border-demo
+  if !flag(demos)
+    Buildable: False
+  hs-source-dirs:      programs
+  ghc-options:         -threaded -Wall -fno-warn-unused-do-bind -O3
+  default-extensions:  CPP
+  default-language:    Haskell2010
+  main-is:             DynamicBorderDemo.hs
+  build-depends:       base <= 5,
+                       brick,
+                       microlens
