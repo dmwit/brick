@@ -112,10 +112,10 @@ cropExtents ctx es = catMaybes $ cropExtent <$> es
 cropBorders :: Context -> EdgeAnnotation DynamicBorder -> EdgeAnnotation DynamicBorder
 cropBorders ctx bs = cropFunctions <*> bs where
     cropFunctions = EdgeAnnotation
-        { eaTop    = cropDB 0      cols
-        , eaBottom = cropDB maxRow cols
-        , eaLeft   = cropDB 0      rows
-        , eaRight  = cropDB maxCol rows
+        { eaTop    = cropDB rows cols
+        , eaBottom = cropDB rows cols
+        , eaLeft   = cropDB cols rows
+        , eaRight  = cropDB cols rows
         }
 
     -- Keep only the keys from 0 (inclusive) to the indicated size (exclusive)
@@ -192,12 +192,11 @@ cropBorders ctx bs = cropFunctions <*> bs where
     -- the border wasn't already in the right exact location, delete it
     -- outright.
     cropDB :: Int -> Int -> DynamicBorder -> DynamicBorder
-    cropDB coord size db
-        | (db ^. coordinateL) /= coord = DynamicBorder M.empty M.empty coord
-        | otherwise = db & offersL    %~ cropMap size
-                         & acceptorsL %~ cropSegmentMap size
+    cropDB perpSize parSize db
+        | coord < 0 || coord >= perpSize = DynamicBorder M.empty M.empty 0
+        | otherwise = db & offersL    %~ cropMap parSize
+                         & acceptorsL %~ cropSegmentMap parSize
+        where coord = db ^. coordinateL
 
     rows = ctx ^. availHeightL
     cols = ctx ^. availWidthL
-    maxRow = rows - 1
-    maxCol = cols - 1
