@@ -618,54 +618,54 @@ renderBox br ws =
 -- sense, then use 'catResults' to combine all the renderings.
 catResults :: BoxRenderer n -> [Result n] -> RenderM n (Result n)
 catResults br allResults = do
-      c <- getContext
-      let allImages = (^.imageL) <$> allResults
-          allPrimaries = imagePrimary br <$> allImages
-          allTranslatedResults = (flip map) (zip [0..] allResults) $ \(i, result) ->
-              let off = locationFromOffset br offPrimary
-                  offPrimary = sum $ take i allPrimaries
-              in addResultOffset off result
-          -- Determine the secondary dimension value to pad to. In a
-          -- vertical box we want all images to be the same width to
-          -- avoid attribute over-runs or blank spaces with the wrong
-          -- attribute. In a horizontal box we want all images to have
-          -- the same height for the same reason.
-          allRewrittenImages = zipWith (rewriteImage br) allBordersAndRewrites allImages
-          maxSecondary = maximum $ imageSecondary br <$> allRewrittenImages
-          padImage img = padImageSecondary br (maxSecondary - imageSecondary br img)
-                         img (c^.attrL)
-          paddedImages = padImage <$> allRewrittenImages
+    c <- getContext
+    let allImages = (^.imageL) <$> allResults
+        allPrimaries = imagePrimary br <$> allImages
+        allTranslatedResults = (flip map) (zip [0..] allResults) $ \(i, result) ->
+            let off = locationFromOffset br offPrimary
+                offPrimary = sum $ take i allPrimaries
+            in addResultOffset off result
+        -- Determine the secondary dimension value to pad to. In a
+        -- vertical box we want all images to be the same width to
+        -- avoid attribute over-runs or blank spaces with the wrong
+        -- attribute. In a horizontal box we want all images to have
+        -- the same height for the same reason.
+        allRewrittenImages = zipWith (rewriteImage br) allBordersAndRewrites allImages
+        maxSecondary = maximum $ imageSecondary br <$> allRewrittenImages
+        padImage img = padImageSecondary br (maxSecondary - imageSecondary br img)
+                       img (c^.attrL)
+        paddedImages = padImage <$> allRewrittenImages
 
-          -- Merge the borders. The internal borders have all been handled
-          -- already, so in the primary direction, we only need the borders
-          -- sandwiching the first and last widget in the list. In the
-          -- secondary direction, we keep everything that's butting up against
-          -- the edge of the new size (it is okay to throw away all the other
-          -- dynamic borders: they're already rendered, and since we are adding
-          -- padding next to them, they need not connect to anything).
-          allBordersAndRewrites = performPairwiseJoins
-              (frontPrimary br)
-              (backPrimary br)
-              (map borders allTranslatedResults)
-          allBorders = [bs | (bs, _, _) <- allBordersAndRewrites]
-          mergeSecondaryBorders coord bs =
-              let matching = filter ((coord==) . coordinate) bs
-              in DynamicBorder
-                { offers = M.unions (offers <$> matching)
-                , acceptors = M.unions (acceptors <$> matching)
-                , coordinate = coord
-                }
-          mergedBorders = annotate br
-            (head allBorders ^. frontPrimary br)
-            (last allBorders ^. backPrimary  br)
-            (mergeSecondaryBorders 0 (allBorders ^.. folded.frontSecondary br))
-            (mergeSecondaryBorders (maxSecondary-1) (allBorders ^.. folded.backSecondary br))
+        -- Merge the borders. The internal borders have all been handled
+        -- already, so in the primary direction, we only need the borders
+        -- sandwiching the first and last widget in the list. In the
+        -- secondary direction, we keep everything that's butting up against
+        -- the edge of the new size (it is okay to throw away all the other
+        -- dynamic borders: they're already rendered, and since we are adding
+        -- padding next to them, they need not connect to anything).
+        allBordersAndRewrites = performPairwiseJoins
+            (frontPrimary br)
+            (backPrimary br)
+            (map borders allTranslatedResults)
+        allBorders = [bs | (bs, _, _) <- allBordersAndRewrites]
+        mergeSecondaryBorders coord bs =
+            let matching = filter ((coord==) . coordinate) bs
+            in DynamicBorder
+              { offers = M.unions (offers <$> matching)
+              , acceptors = M.unions (acceptors <$> matching)
+              , coordinate = coord
+              }
+        mergedBorders = annotate br
+          (head allBorders ^. frontPrimary br)
+          (last allBorders ^. backPrimary  br)
+          (mergeSecondaryBorders 0 (allBorders ^.. folded.frontSecondary br))
+          (mergeSecondaryBorders (maxSecondary-1) (allBorders ^.. folded.backSecondary br))
 
-      cropResultToContext $ Result (concatenatePrimary br paddedImages)
-                            (concat $ cursors <$> allTranslatedResults)
-                            (concat $ visibilityRequests <$> allTranslatedResults)
-                            (concat $ extents <$> allTranslatedResults)
-                            mergedBorders
+    cropResultToContext $ Result (concatenatePrimary br paddedImages)
+                          (concat $ cursors <$> allTranslatedResults)
+                          (concat $ visibilityRequests <$> allTranslatedResults)
+                          (concat $ extents <$> allTranslatedResults)
+                          mergedBorders
 
 rewriteImage ::
     BoxRenderer n ->
